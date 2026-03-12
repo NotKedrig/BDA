@@ -10,12 +10,30 @@ import streamlit as st
 OUTPUT_DIR = "output_stream"
 
 
+def get_latest_run_dir(base_dir: str) -> str | None:
+    if not os.path.exists(base_dir):
+        return None
+
+    run_dirs = []
+    for name in os.listdir(base_dir):
+        full = os.path.join(base_dir, name)
+        if name.startswith("_") or not os.path.isdir(full):
+            continue
+        run_dirs.append(full)
+
+    if not run_dirs:
+        return None
+
+    return max(run_dirs, key=os.path.getmtime)
+
+
 def load_latest_data() -> pd.DataFrame:
-    if not os.path.exists(OUTPUT_DIR):
+    run_dir = get_latest_run_dir(OUTPUT_DIR)
+    if not run_dir:
         return pd.DataFrame()
 
-    # Spark writes CSV as output_stream/<subdir>/part-00000-*.csv in append mode
-    files = glob.glob(os.path.join(OUTPUT_DIR, "**", "*.csv"), recursive=True)
+    # Spark writes CSV as <run_dir>/<subdir>/part-00000-*.csv in append mode
+    files = glob.glob(os.path.join(run_dir, "**", "*.csv"), recursive=True)
     if not files:
         return pd.DataFrame()
 

@@ -1,6 +1,6 @@
-import json
 import os
-from typing import Dict
+import time
+from typing import Dict, Tuple
 
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
@@ -15,11 +15,24 @@ from pyspark.sql.types import (
 KAFKA_BROKER = os.environ.get("KAFKA_BROKER", "localhost:9092")
 TOPIC_NAME = "ipl_match_stream"
 DELIVERIES_PATH = os.path.join("archive", "deliveries.csv")
-OUTPUT_DIR = os.path.join("output_stream")
+BASE_OUTPUT_DIR = os.path.join("output_stream")
 
 # Same match and inning as simulator
 MATCH_ID = 335983
 TARGET_INNING = 2
+
+
+def get_run_output_paths() -> Tuple[str, str]:
+    """
+    Each Spark run writes to its own folder so the dashboard starts from the beginning
+    on every run (no mixing with previous output or checkpoints).
+    """
+    run_id = os.environ.get("RUN_ID")
+    if not run_id:
+        run_id = time.strftime("%Y%m%d_%H%M%S")
+    out_dir = os.path.join(BASE_OUTPUT_DIR, run_id)
+    checkpoint_dir = os.path.join(BASE_OUTPUT_DIR, "_checkpoint", run_id)
+    return out_dir, checkpoint_dir
 
 
 def build_spark() -> SparkSession:
@@ -198,7 +211,9 @@ def add_metrics(batch_df: DataFrame, target_runs: int) -> DataFrame:
     )
 
 
-def process_batch(batch_df: DataFrame, batch_id: int, target_runs: int) -> None:
+def process_batch(
+    batch_df: DataFrame, batch_id: int, target_runs: int, output_dir: str
+) -> None:
     # Log basic info so we can debug end-to-end
     total_rows = batch_df.count()
     print(f"Processing batch {batch_id}: raw rows = {total_rows}")
@@ -211,25 +226,32 @@ def process_batch(batch_df: DataFrame, batch_id: int, target_runs: int) -> None:
         print(f"Processing batch {batch_id}: no rows after filtering match/inning")
         return
 
-    (metrics_df.coalesce(1).write.mode("append").option("header", True).csv(OUTPUT_DIR))
+    (metrics_df.coalesce(1).write.mode("append").option("header", True).csv(output_dir))
 
 
 def main() -> None:
     spark = build_spark()
     spark.sparkContext.setLogLevel("WARN")
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    output_dir, checkpoint_dir = get_run_output_paths()
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
     target_runs = compute_target_runs(spark)
     print(f"Computed target for match {MATCH_ID}: {target_runs} runs")
+    print(f"Writing stream output to: {output_dir}")
 
     schema = get_delivery_schema()
 
+    # IMPORTANT for the demo:
+    # Use 'latest' so each new run only processes fresh messages
+    # from the simulator instead of re-reading all old messages
+    # left in the Kafka topic from previous runs.
     raw_stream = (
         spark.readStream.format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_BROKER)
         .option("subscribe", TOPIC_NAME)
-        .option("startingOffsets", "earliest")
+        .option("startingOffsets", "latest")
         .load()
     )
 
@@ -242,8 +264,8 @@ def main() -> None:
 
     query = (
         parsed.writeStream.outputMode("append")
-        .foreachBatch(lambda df, bid: process_batch(df, bid, target_runs))
-        .option("checkpointLocation", os.path.join(OUTPUT_DIR, "_checkpoint"))
+        .foreachBatch(lambda df, bid: process_batch(df, bid, target_runs, output_dir))
+        .option("checkpointLocation", checkpoint_dir)
         .start()
     )
 
