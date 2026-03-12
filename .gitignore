@@ -1,0 +1,4 @@
+# Spark/Ivy cache (when using IVY_USER_DIR=/app/.ivy2)
+.ivy2/
+# Spark streaming output
+output_stream/

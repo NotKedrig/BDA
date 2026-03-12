@@ -1,0 +1,70 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  # Single Spark container: stays up so you can run spark-submit inside it (no Spark on host needed).
+  # Run: docker compose exec spark /opt/spark/bin/spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 /app/spark_processor.py
+  spark:
+    image: apache/spark:3.5.1
+    container_name: spark
+    restart: unless-stopped
+    environment:
+      - KAFKA_BROKER=kafka:9092
+      - PATH=/opt/spark/bin:/opt/spark/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      # Force Ivy cache under /app (writable) instead of /home/spark/.ivy2
+      - SPARK_SUBMIT_OPTS=-Duser.home=/app
+    volumes:
+      - ./:/app
+    working_dir: /app
+    depends_on:
+      - kafka
+    command: ["sleep", "infinity"]
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    image: bda-app:latest
+    container_name: bda_app
+    restart: unless-stopped
+    environment:
+      - KAFKA_BROKER=kafka:9092
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./:/app
+    working_dir: /app
+    depends_on:
+      - kafka
+    command: ["sleep", "infinity"]
+
+networks:
+  default:
+    name: bda_network
