@@ -67,9 +67,20 @@ def render_dashboard(df: pd.DataFrame) -> None:
         return
 
     latest = df.iloc[-1]
+    predicted_winner = (
+        "Batting team likely to win"
+        if float(latest["win_probability"]) > 50.0
+        else "Bowling team likely to win"
+    )
+    projected_score = int(
+        round(
+            float(latest["cumulative_runs"])
+            + (float(latest["balls_remaining"]) * float(latest["current_run_rate"]) / 6.0)
+        )
+    )
 
     with placeholder_metrics.container():
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
         with col1:
             st.metric(
                 "Current Score",
@@ -81,6 +92,10 @@ def render_dashboard(df: pd.DataFrame) -> None:
             st.metric("Required Run Rate (RRR)", f"{latest['required_run_rate']:.2f}")
         with col4:
             st.metric("Win Probability (%)", f"{latest['win_probability']:.1f}")
+        with col5:
+            st.metric("Projected Score", f"{projected_score}")
+        with col6:
+            st.metric("Predicted Winner", predicted_winner)
 
     # Worm graph: Win probability over time
     fig = px.line(

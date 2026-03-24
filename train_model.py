@@ -23,6 +23,9 @@ FEATURE_COLUMNS = [
     "balls_remaining",
     "required_run_rate",
     "current_run_rate",
+    "runs_last_30",
+    "wickets_last_30",
+    "recent_rr",
 ]
 
 
@@ -71,6 +74,21 @@ def build_training_frame() -> pd.DataFrame:
     )
     d2["required_run_rate"] = d2["required_run_rate"].replace([np.inf, -np.inf], 0.0)
     d2["required_run_rate"] = d2["required_run_rate"].fillna(0.0)
+
+    # Momentum features: last 30 balls (5 overs) dynamics
+    d2["runs_last_30"] = (
+        d2.groupby("match_id")["total_runs"]
+        .rolling(window=30, min_periods=1)
+        .sum()
+        .reset_index(level=0, drop=True)
+    )
+    d2["wickets_last_30"] = (
+        d2.groupby("match_id")["is_wicket"]
+        .rolling(window=30, min_periods=1)
+        .sum()
+        .reset_index(level=0, drop=True)
+    )
+    d2["recent_rr"] = d2["runs_last_30"] / 5.0
 
     # Binary target: does chasing batting team end up winning the match?
     d2["target_win"] = (d2["batting_team"] == d2["winner"]).astype(int)

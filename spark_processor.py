@@ -2,6 +2,7 @@ import os
 import pickle
 import time
 import json
+from collections import deque
 from typing import Dict, Tuple
 
 import pandas as pd
@@ -32,6 +33,9 @@ FEATURE_COLUMNS = [
     "balls_remaining",
     "required_run_rate",
     "current_run_rate",
+    "runs_last_30",
+    "wickets_last_30",
+    "recent_rr",
 ]
 FEATURE_META_PATH = "feature_columns.json"
 
@@ -45,6 +49,8 @@ STREAM_STATE = {
     "wickets_fallen": 0,
     "seen_event_keys": set(),
     "last_win_probability": None,
+    "last_30_runs": deque(maxlen=30),
+    "last_30_wickets": deque(maxlen=30),
 }
 
 
@@ -203,6 +209,8 @@ def process_batch(
         STREAM_STATE["seen_event_keys"].add(event_key)
         STREAM_STATE["current_score"] += int(row["total_runs"])
         STREAM_STATE["wickets_fallen"] += int(row["is_wicket"])
+        STREAM_STATE["last_30_runs"].append(int(row["total_runs"]))
+        STREAM_STATE["last_30_wickets"].append(int(row["is_wicket"]))
 
         ball_number = int(row["ball_number"])
         balls_remaining = max(120 - ball_number, 0)
@@ -224,6 +232,9 @@ def process_batch(
         # Feature clipping for numeric stability (cricket-physical ranges).
         current_run_rate = max(0.0, min(current_run_rate, 36.0))
         required_run_rate = max(0.0, min(required_run_rate, 36.0))
+        runs_last_30 = float(sum(STREAM_STATE["last_30_runs"]))
+        wickets_last_30 = float(sum(STREAM_STATE["last_30_wickets"]))
+        recent_rr = runs_last_30 / 5.0
 
         feature_values = [
             float(STREAM_STATE["current_score"]),
@@ -231,6 +242,9 @@ def process_batch(
             float(balls_remaining),
             float(required_run_rate),
             float(current_run_rate),
+            runs_last_30,
+            wickets_last_30,
+            recent_rr,
         ]
 
         feature_arr = pd.DataFrame([feature_values], columns=FEATURE_COLUMNS).values
@@ -283,6 +297,9 @@ def process_batch(
                 "balls_remaining": int(balls_remaining),
                 "current_run_rate": float(current_run_rate),
                 "required_run_rate": float(required_run_rate),
+                "runs_last_30": runs_last_30,
+                "wickets_last_30": wickets_last_30,
+                "recent_rr": recent_rr,
                 "raw_model_probability": float(max(0.0, min(100.0, raw_model_prob))),
                 "raw_model_logit": raw_logit,
                 "win_probability": win_prob,
@@ -302,6 +319,9 @@ def process_batch(
         "balls_remaining",
         "required_run_rate",
         "current_run_rate",
+        "runs_last_30",
+        "wickets_last_30",
+        "recent_rr",
         "raw_model_probability",
         "win_probability",
     ]
