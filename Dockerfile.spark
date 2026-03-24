@@ -1,0 +1,7 @@
+FROM apache/spark:3.5.1
+
+# Install Python dependencies needed by spark_processor.py inference path
+USER root
+RUN python3 -m pip install --no-cache-dir pandas numpy scikit-learn
+USER spark
+

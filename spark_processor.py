@@ -1,10 +1,14 @@
 import os
+import pickle
 import time
+import json
 from typing import Dict, Tuple
 
-from pyspark.sql import DataFrame, SparkSession, Window
+import pandas as pd
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
+    DoubleType,
     IntegerType,
     StringType,
     StructField,
@@ -20,6 +24,42 @@ BASE_OUTPUT_DIR = os.path.join("output_stream")
 # Same match and inning as simulator
 MATCH_ID = 335983
 TARGET_INNING = 2
+MODEL_PATH = "model.pkl"
+SCALER_PATH = "scaler.pkl"
+FEATURE_COLUMNS = [
+    "cumulative_runs",
+    "wickets_fallen",
+    "balls_remaining",
+    "required_run_rate",
+    "current_run_rate",
+]
+FEATURE_META_PATH = "feature_columns.json"
+
+# Loaded once in main
+MODEL = None
+SCALER = None
+
+# Stateful stream context for one match/innings run
+STREAM_STATE = {
+    "current_score": 0,
+    "wickets_fallen": 0,
+    "seen_event_keys": set(),
+    "last_win_probability": None,
+}
+
+
+def resolve_artifact_path(filename: str) -> str:
+    candidates = [
+        os.path.join("/tmp", filename),
+        os.path.join(".", filename),
+        os.path.join("/app", filename),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    raise FileNotFoundError(
+        f"Could not find {filename}. Checked: {', '.join(candidates)}"
+    )
 
 
 def get_run_output_paths() -> Tuple[str, str]:
@@ -105,90 +145,17 @@ def cast_delivery_columns(df: DataFrame) -> DataFrame:
     return df
 
 
-def add_metrics(batch_df: DataFrame, target_runs: int) -> DataFrame:
-    df = batch_df.filter(
+def prepare_events(batch_df: DataFrame) -> DataFrame:
+    df = cast_delivery_columns(batch_df)
+    df = df.filter(
         (F.col("match_id") == MATCH_ID) & (F.col("inning") == TARGET_INNING)
     )
 
     if df.rdd.isEmpty():
         return df
 
-    df = df.withColumn("is_wicket_int", F.col("is_wicket").cast(IntegerType()))
-
-    # Sort within match/inning by over and ball and compute cumulative metrics
-    window_spec = (
-        Window.partitionBy("match_id", "inning")
-        .orderBy(F.col("over").cast("int"), F.col("ball").cast("int"))
-        .rowsBetween(Window.unboundedPreceding, Window.currentRow)
-    )
-
     df = df.withColumn(
-        "current_score", F.sum(F.col("total_runs")).over(window_spec)
-    ).withColumn(
-        "wickets",
-        F.sum(F.when(F.col("is_wicket_int") == 1, 1).otherwise(0)).over(window_spec),
-    )
-
-    # Balls faced so far
-    df = df.withColumn(
-        "ball_number",
-        (F.col("over").cast("int") * 6 + F.col("ball").cast("int")),
-    )
-
-    df = df.withColumn("overs_faced", F.col("ball_number") / F.lit(6.0))
-
-    df = df.withColumn(
-        "crr",
-        F.when(F.col("overs_faced") > 0, F.col("current_score") / F.col("overs_faced")).otherwise(
-            F.lit(0.0)
-        ),
-    )
-
-    df = df.withColumn("target", F.lit(float(target_runs)))
-    df = df.withColumn("runs_remaining", F.col("target") - F.col("current_score"))
-
-    df = df.withColumn("overs_remaining", F.lit(20.0) - F.col("overs_faced"))
-
-    df = df.withColumn(
-        "rrr",
-        F.when(F.col("overs_remaining") > 0, F.col("runs_remaining") / F.col("overs_remaining")).otherwise(
-            F.lit(0.0)
-        ),
-    )
-
-    # Simple heuristic win probability (0-100)
-    # Factors: score vs target, run rate vs required, wickets in hand, progress in innings.
-    df = df.withColumn(
-        "progress",
-        F.when(F.col("target") > 0, F.col("current_score") / F.col("target")).otherwise(
-            F.lit(0.0)
-        ),
-    )
-
-    df = df.withColumn(
-        "rr_factor",
-        F.when(F.col("rrr") > 0, F.col("crr") / (F.col("rrr") + F.lit(1e-6))).otherwise(
-            F.lit(2.0)
-        ),
-    )
-
-    df = df.withColumn(
-        "wicket_penalty",
-        F.col("wickets") * F.lit(3.0),
-    )
-
-    df = df.withColumn(
-        "raw_win_prob",
-        F.col("progress") * F.lit(60.0) + F.col("rr_factor") * F.lit(10.0) - F.col(
-            "wicket_penalty"
-        ),
-    )
-
-    df = df.withColumn(
-        "win_probability",
-        F.when(F.col("raw_win_prob") < 0, 0.0)
-        .when(F.col("raw_win_prob") > 100, 100.0)
-        .otherwise(F.col("raw_win_prob")),
+        "ball_number", F.col("over") * F.lit(6) + F.col("ball")
     )
 
     return df.select(
@@ -199,15 +166,10 @@ def add_metrics(batch_df: DataFrame, target_runs: int) -> DataFrame:
         "over",
         "ball",
         "ball_number",
-        "current_score",
-        "wickets",
-        "overs_faced",
-        "crr",
-        "target",
-        "runs_remaining",
-        "overs_remaining",
-        "rrr",
-        "win_probability",
+        "batsman_runs",
+        "extra_runs",
+        "total_runs",
+        "is_wicket",
     )
 
 
@@ -218,18 +180,162 @@ def process_batch(
     total_rows = batch_df.count()
     print(f"Processing batch {batch_id}: raw rows = {total_rows}")
 
-    metrics_df = add_metrics(batch_df, target_runs)
-    metrics_rows = metrics_df.count()
-    print(f"Processing batch {batch_id}: metrics rows = {metrics_rows}")
+    events_df = prepare_events(batch_df)
+    metrics_rows = events_df.count()
+    print(f"Processing batch {batch_id}: filtered ball rows = {metrics_rows}")
 
     if metrics_rows == 0:
         print(f"Processing batch {batch_id}: no rows after filtering match/inning")
         return
 
-    (metrics_df.coalesce(1).write.mode("append").option("header", True).csv(output_dir))
+    pdf = events_df.toPandas()
+    if pdf.empty:
+        return
+
+    pdf = pdf.sort_values(["ball_number"]).reset_index(drop=True)
+
+    output_rows = []
+    for _, row in pdf.iterrows():
+        event_key = f"{int(row['match_id'])}_{int(row['inning'])}_{int(row['ball_number'])}"
+        if event_key in STREAM_STATE["seen_event_keys"]:
+            continue
+
+        STREAM_STATE["seen_event_keys"].add(event_key)
+        STREAM_STATE["current_score"] += int(row["total_runs"])
+        STREAM_STATE["wickets_fallen"] += int(row["is_wicket"])
+
+        ball_number = int(row["ball_number"])
+        balls_remaining = max(120 - ball_number, 0)
+        overs_faced = ball_number / 6.0 if ball_number > 0 else 0.0
+        current_run_rate = (
+            STREAM_STATE["current_score"] / overs_faced if overs_faced > 0 else 0.0
+        )
+
+        runs_remaining = float(target_runs) - float(STREAM_STATE["current_score"])
+        overs_remaining = balls_remaining / 6.0
+        # Stable RRR handling at edge cases:
+        # - if no overs left and target reached => 0
+        # - if no overs left and target not reached => max pressure value
+        if overs_remaining > 0:
+            required_run_rate = runs_remaining / overs_remaining
+        else:
+            required_run_rate = 0.0 if runs_remaining <= 0 else 36.0
+
+        # Feature clipping for numeric stability (cricket-physical ranges).
+        current_run_rate = max(0.0, min(current_run_rate, 36.0))
+        required_run_rate = max(0.0, min(required_run_rate, 36.0))
+
+        feature_values = [
+            float(STREAM_STATE["current_score"]),
+            float(STREAM_STATE["wickets_fallen"]),
+            float(balls_remaining),
+            float(required_run_rate),
+            float(current_run_rate),
+        ]
+
+        feature_arr = pd.DataFrame([feature_values], columns=FEATURE_COLUMNS).values
+        if SCALER is not None:
+            feature_arr = SCALER.transform(feature_arr)
+        raw_model_prob = float(MODEL.predict_proba(feature_arr)[0][1] * 100.0)
+        raw_logit = None
+        if hasattr(MODEL, "decision_function"):
+            raw_logit = float(MODEL.decision_function(feature_arr)[0])
+
+        # Terminal-state overrides (must-have for correctness)
+        if STREAM_STATE["current_score"] >= target_runs:
+            win_prob = 100.0
+        elif balls_remaining == 0 and STREAM_STATE["current_score"] < target_runs:
+            win_prob = 0.0
+        else:
+            win_prob = raw_model_prob
+
+        # Optional smoothing: cap per-ball change to avoid unrealistic jumps,
+        # except when terminal override applies.
+        prev_prob = STREAM_STATE["last_win_probability"]
+        terminal_state = (
+            STREAM_STATE["current_score"] >= target_runs
+            or (balls_remaining == 0 and STREAM_STATE["current_score"] < target_runs)
+        )
+        if prev_prob is not None and not terminal_state:
+            delta = win_prob - prev_prob
+            if delta > 15.0:
+                win_prob = prev_prob + 15.0
+            elif delta < -15.0:
+                win_prob = prev_prob - 15.0
+
+        win_prob = float(max(0.0, min(100.0, win_prob)))
+        STREAM_STATE["last_win_probability"] = win_prob
+
+        output_rows.append(
+            {
+                "event_key": event_key,
+                "match_id": int(row["match_id"]),
+                "inning": int(row["inning"]),
+                "batting_team": str(row["batting_team"]),
+                "bowling_team": str(row["bowling_team"]),
+                "over": int(row["over"]),
+                "ball": int(row["ball"]),
+                "ball_number": ball_number,
+                "total_runs": int(row["total_runs"]),
+                "is_wicket": int(row["is_wicket"]),
+                "cumulative_runs": int(STREAM_STATE["current_score"]),
+                "wickets_fallen": int(STREAM_STATE["wickets_fallen"]),
+                "balls_remaining": int(balls_remaining),
+                "current_run_rate": float(current_run_rate),
+                "required_run_rate": float(required_run_rate),
+                "raw_model_probability": float(max(0.0, min(100.0, raw_model_prob))),
+                "raw_model_logit": raw_logit,
+                "win_probability": win_prob,
+                "target_runs": int(target_runs),
+            }
+        )
+
+    if not output_rows:
+        print(f"Processing batch {batch_id}: no new events after dedupe")
+        return
+
+    out_pdf = pd.DataFrame(output_rows)
+    debug_cols = [
+        "ball_number",
+        "cumulative_runs",
+        "wickets_fallen",
+        "balls_remaining",
+        "required_run_rate",
+        "current_run_rate",
+        "raw_model_probability",
+        "win_probability",
+    ]
+    print(f"Batch {batch_id} tail(10) feature/prediction snapshot:")
+    print(out_pdf[debug_cols].tail(10).to_string(index=False))
+
+    out_sdf = batch_df.sparkSession.createDataFrame(out_pdf)
+    out_sdf.coalesce(1).write.mode("append").option("header", True).csv(output_dir)
+    print(f"Processing batch {batch_id}: output rows written = {len(output_rows)}")
 
 
 def main() -> None:
+    global MODEL, SCALER, FEATURE_COLUMNS
+
+    model_path = resolve_artifact_path(MODEL_PATH)
+    scaler_path = resolve_artifact_path(SCALER_PATH)
+    feature_meta_path = resolve_artifact_path(FEATURE_META_PATH)
+    print(f"Loading model from: {model_path}")
+    print(f"Loading scaler from: {scaler_path}")
+    print(f"Loading feature metadata from: {feature_meta_path}")
+
+    with open(feature_meta_path, "r", encoding="utf-8") as f:
+        feature_meta = json.load(f)
+    trained_feature_columns = feature_meta.get("feature_columns", [])
+    if not trained_feature_columns:
+        raise ValueError("feature_columns.json is missing 'feature_columns'.")
+    FEATURE_COLUMNS = trained_feature_columns
+    print(f"Inference feature order: {FEATURE_COLUMNS}")
+
+    with open(model_path, "rb") as f:
+        MODEL = pickle.load(f)
+    with open(scaler_path, "rb") as f:
+        SCALER = pickle.load(f)
+
     spark = build_spark()
     spark.sparkContext.setLogLevel("WARN")
 
@@ -266,6 +372,7 @@ def main() -> None:
         parsed.writeStream.outputMode("append")
         .foreachBatch(lambda df, bid: process_batch(df, bid, target_runs, output_dir))
         .option("checkpointLocation", checkpoint_dir)
+        .trigger(processingTime="1 second")
         .start()
     )
 

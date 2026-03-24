@@ -32,7 +32,10 @@ services:
   # Single Spark container: stays up so you can run spark-submit inside it (no Spark on host needed).
   # Run: docker compose exec spark /opt/spark/bin/spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 /app/spark_processor.py
   spark:
-    image: apache/spark:3.5.1
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    image: bda-spark:latest
     container_name: spark
     restart: unless-stopped
     environment:

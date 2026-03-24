@@ -1,0 +1,9 @@
+{
+  "feature_columns": [
+    "cumulative_runs",
+    "wickets_fallen",
+    "balls_remaining",
+    "required_run_rate",
+    "current_run_rate"
+  ]
+}

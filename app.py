@@ -48,11 +48,10 @@ def load_latest_data() -> pd.DataFrame:
     if not dfs:
         return pd.DataFrame()
 
-    df = pd.concat(dfs, ignore_index=True).drop_duplicates(
-        subset=["match_id", "inning", "ball_number"], keep="last"
-    )
-
-    df = df.sort_values(["over", "ball"]).reset_index(drop=True)
+    df = pd.concat(dfs, ignore_index=True)
+    if "event_key" in df.columns:
+        df = df.drop_duplicates(subset=["event_key"], keep="last")
+    df = df.sort_values("ball_number").reset_index(drop=True)
     return df
 
 
@@ -74,12 +73,12 @@ def render_dashboard(df: pd.DataFrame) -> None:
         with col1:
             st.metric(
                 "Current Score",
-                f"{int(latest['current_score'])}/{int(latest['wickets'])}",
+                f"{int(latest['cumulative_runs'])}/{int(latest['wickets_fallen'])}",
             )
         with col2:
-            st.metric("Current Run Rate (CRR)", f"{latest['crr']:.2f}")
+            st.metric("Current Run Rate (CRR)", f"{latest['current_run_rate']:.2f}")
         with col3:
-            st.metric("Required Run Rate (RRR)", f"{latest['rrr']:.2f}")
+            st.metric("Required Run Rate (RRR)", f"{latest['required_run_rate']:.2f}")
         with col4:
             st.metric("Win Probability (%)", f"{latest['win_probability']:.1f}")
 
@@ -108,10 +107,28 @@ def main() -> None:
         "Auto-refresh interval (seconds)", 1, 10, 2, 1
     )
 
-    # Render once per run, then rerun after a short delay.
-    # This avoids creating duplicate elements in a single run.
-    df = load_latest_data()
-    render_dashboard(df)
+    # Append only new rows on each refresh to avoid full recomputation artifacts.
+    if "history_df" not in st.session_state:
+        st.session_state.history_df = pd.DataFrame()
+    if "seen_event_keys" not in st.session_state:
+        st.session_state.seen_event_keys = set()
+
+    latest_df = load_latest_data()
+    if not latest_df.empty:
+        if "event_key" in latest_df.columns:
+            new_df = latest_df[~latest_df["event_key"].isin(st.session_state.seen_event_keys)]
+            if not new_df.empty:
+                st.session_state.history_df = pd.concat(
+                    [st.session_state.history_df, new_df], ignore_index=True
+                )
+                st.session_state.history_df = st.session_state.history_df.sort_values(
+                    "ball_number"
+                ).reset_index(drop=True)
+                st.session_state.seen_event_keys.update(new_df["event_key"].tolist())
+        else:
+            st.session_state.history_df = latest_df
+
+    render_dashboard(st.session_state.history_df)
     time.sleep(refresh_interval)
     st.rerun()
 
