@@ -67,10 +67,10 @@ def render_dashboard(df: pd.DataFrame) -> None:
         return
 
     latest = df.iloc[-1]
+    batting_team = str(latest.get("batting_team", "Batting team"))
+    bowling_team = str(latest.get("bowling_team", "Bowling team"))
     predicted_winner = (
-        "Batting team likely to win"
-        if float(latest["win_probability"]) > 50.0
-        else "Bowling team likely to win"
+        batting_team if float(latest["win_probability"]) > 50.0 else bowling_team
     )
     projected_score = int(
         round(

@@ -23,7 +23,7 @@ DELIVERIES_PATH = os.path.join("archive", "deliveries.csv")
 BASE_OUTPUT_DIR = os.path.join("output_stream")
 
 # Same match and inning as simulator
-MATCH_ID = 335983
+MATCH_ID = 335984
 TARGET_INNING = 2
 MODEL_PATH = "model.pkl"
 SCALER_PATH = "scaler.pkl"

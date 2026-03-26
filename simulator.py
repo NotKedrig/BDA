@@ -13,7 +13,7 @@ KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:29092")
 TOPIC_NAME = "ipl_match_stream"
 
 # Exciting match to stream (2nd innings only)
-MATCH_ID = 335983
+MATCH_ID = 335984
 TARGET_INNING = 2
 
 
