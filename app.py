@@ -69,6 +69,14 @@ def render_dashboard(df: pd.DataFrame) -> None:
     latest = df.iloc[-1]
     batting_team = str(latest.get("batting_team", "Batting team"))
     bowling_team = str(latest.get("bowling_team", "Bowling team"))
+    teams_matchup = f"{batting_team} vs {bowling_team}"
+
+    target_to_beat = None
+    if "target_runs" in df.columns:
+        try:
+            target_to_beat = int(latest["target_runs"])
+        except Exception:
+            target_to_beat = None
     predicted_winner = (
         batting_team if float(latest["win_probability"]) > 50.0 else bowling_team
     )
@@ -80,7 +88,9 @@ def render_dashboard(df: pd.DataFrame) -> None:
     )
 
     with placeholder_metrics.container():
-        col1, col2, col3, col4, col5, col6 = st.columns(6)
+        st.markdown(f"**Teams:** {teams_matchup}")
+
+        col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
         with col1:
             st.metric(
                 "Current Score",
@@ -96,6 +106,11 @@ def render_dashboard(df: pd.DataFrame) -> None:
             st.metric("Projected Score", f"{projected_score}")
         with col6:
             st.metric("Predicted Winner", predicted_winner)
+        with col7:
+            if target_to_beat is not None:
+                st.metric("Score to Beat", target_to_beat)
+            else:
+                st.metric("Score to Beat", "N/A")
 
     # Worm graph: Win probability over time
     fig = px.line(
