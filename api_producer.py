@@ -598,11 +598,31 @@ def main() -> None:
         api_outcome = "skipped"
 
         try:
-            cur = fetch_json(CRIC_CURRENT, {"apikey": api_key, "offset": 0})
-            matches = list_current_matches(cur)
-            pick = pick_live_t20_match(matches)
+            # 1) Prefer a truly live match directly from cricScore (ms == \"live\")
+            score_payload = fetch_json(CRIC_SCORE, {"apikey": api_key})
+            score_rows = list_score_matches(score_payload)
+            live_rows = [
+                row
+                for row in score_rows
+                if str(row.get("ms", "")).strip().lower() == "live"
+            ]
+
+            pick: Optional[Dict[str, Any]] = None
+            if live_rows:
+                pick = live_rows[0]
+                log.info(
+                    "Selected live match from cricScore: id=%s status=%s",
+                    match_id_str(pick),
+                    pick.get("status"),
+                )
+            else:
+                # 2) Fallback to currentMatches (may be all ended at some times)
+                cur = fetch_json(CRIC_CURRENT, {"apikey": api_key, "offset": 0})
+                matches = list_current_matches(cur)
+                pick = pick_live_t20_match(matches)
+
             if not pick:
-                log.info("currentMatches: no suitable live T20 match.")
+                log.info("No suitable live match found in cricScore/currentMatches.")
                 api_outcome = "no_match"
                 need_simulator = True
             else:
